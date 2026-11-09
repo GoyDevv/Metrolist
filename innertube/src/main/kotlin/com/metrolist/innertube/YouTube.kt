@@ -131,12 +131,19 @@ object YouTube {
         set(value) {
             innerTube.useLoginForBrowse = value
         }
+    // so liek right here expose regionOverrideActive so we can turn it off when country is on system default
+    var regionOverrideActive: Boolean
+        get() = innerTube.regionOverrideActive
+        set(value) {
+            innerTube.regionOverrideActive = value
+        }
 
     fun extractionTransport(): InnerTube.ExtractionTransport = innerTube.extractionTransport()
 
     suspend fun searchSuggestions(query: String): Result<SearchSuggestions> =
         runCatching {
-            val response = innerTube.getSearchSuggestions(WEB_REMIX, query).body<GetSearchSuggestionsResponse>()
+            // so liek right here pass setLogin = useLoginForBrowse so search suggestions use our logged in account too
+            val response = innerTube.getSearchSuggestions(WEB_REMIX, query, setLogin = useLoginForBrowse).body<GetSearchSuggestionsResponse>()
             SearchSuggestions(
                 queries =
                     response.contents
@@ -1540,7 +1547,9 @@ object YouTube {
                 return@runCatching homeContinuation(continuation).getOrThrow()
             }
 
-            val response = innerTube.browse(WEB_REMIX, browseId = "FEmusic_home", params = params).body<BrowseResponse>()
+            // so liek right here there was some issue I saw where setLogin = true was missing on FEmusic_home
+            // so even when logged in it did an anonymous browse call and gave regional stuff instead of our listening history
+            val response = innerTube.browse(WEB_REMIX, browseId = "FEmusic_home", params = params, setLogin = true).body<BrowseResponse>()
             Timber.d("home() response received")
             val continuation =
                 response.contents
@@ -1581,8 +1590,9 @@ object YouTube {
 
     private suspend fun homeContinuation(continuation: String): Result<HomePage> =
         runCatching {
+            // so liek right here homeContinuation also needed setLogin = true otherwise scrolling down went back to regional stuff lol
             val response =
-                innerTube.browse(WEB_REMIX, continuation = continuation).body<BrowseResponse>()
+                innerTube.browse(WEB_REMIX, continuation = continuation, setLogin = true).body<BrowseResponse>()
             val continuation =
                 response.continuationContents
                     ?.sectionListContinuation
@@ -1603,7 +1613,7 @@ object YouTube {
 
     suspend fun explore(): Result<ExplorePage> =
         runCatching {
-            val response = innerTube.browse(WEB_REMIX, browseId = "FEmusic_explore").body<BrowseResponse>()
+            val response = innerTube.browse(WEB_REMIX, browseId = "FEmusic_explore", setLogin = true).body<BrowseResponse>()
             ExplorePage(
                 newReleaseAlbums =
                     response.contents
@@ -1658,7 +1668,7 @@ object YouTube {
 
     suspend fun newReleaseAlbums(): Result<List<AlbumItem>> =
         runCatching {
-            val response = innerTube.browse(WEB_REMIX, browseId = "FEmusic_new_releases_albums").body<BrowseResponse>()
+            val response = innerTube.browse(WEB_REMIX, browseId = "FEmusic_new_releases_albums", setLogin = true).body<BrowseResponse>()
             response.contents
                 ?.singleColumnBrowseResultsRenderer
                 ?.tabs
@@ -1694,8 +1704,8 @@ object YouTube {
         params: String?,
     ): Result<BrowseResult> =
         runCatching {
-            // Use authentication for library endpoints
-            val needsLogin = browseId.startsWith("FEmusic_library") || browseId == "VLSE" || browseId == "VLRDPN"
+            // so liek right here use login whenever useLoginForBrowse is on so browse pages match our account
+            val needsLogin = useLoginForBrowse || browseId.startsWith("FEmusic_library") || browseId == "VLSE" || browseId == "VLRDPN"
             val response = innerTube.browse(WEB_REMIX, browseId = browseId, params = params, setLogin = needsLogin).body<BrowseResponse>()
             val sectionContents =
                 response.contents
@@ -3014,7 +3024,8 @@ object YouTube {
 
     suspend fun related(endpoint: BrowseEndpoint): Result<RelatedPage> =
         runCatching {
-            val response = innerTube.browse(WEB_REMIX, endpoint.browseId).body<BrowseResponse>()
+            // so liek right here pass setLogin = true so related songs use our yt music account context too
+            val response = innerTube.browse(WEB_REMIX, endpoint.browseId, setLogin = true).body<BrowseResponse>()
             val songs = mutableListOf<SongItem>()
             val albums = mutableListOf<AlbumItem>()
             val artists = mutableListOf<ArtistItem>()

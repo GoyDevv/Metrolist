@@ -291,8 +291,12 @@ class MainActivity : FragmentActivity() {
                 // Disconnect Listen Together manager
                 listenTogetherManager.setPlayerConnection(null)
                 playerConnection?.dispose()
-                // DO NOT null out playerConnection here - keep it for when service reconnects
-                // DO NOT update playerConnectionSnapshot - this is the key to preventing recomposition
+                // so liek right here there was some issue I saw where if the service died or disconnected
+                // isServiceBound stayed true and playerConnection stayed pointing at the dead service
+                // so the player literally never showed up again till u force stopped the app lol
+                isServiceBound = false
+                playerConnection = null
+                playerConnectionSnapshot = null
             }
         }
 
@@ -339,8 +343,12 @@ class MainActivity : FragmentActivity() {
             }
         }
 
-        // Bind to service - if already bound, this is a no-op but ensures we stay connected
-        if (!isServiceBound) {
+        // so liek right here if playerConnection got nulled out or service died we gotta rebind
+        if (!isServiceBound || playerConnection == null) {
+            if (isServiceBound) {
+                runCatching { unbindService(serviceConnection) }
+                isServiceBound = false
+            }
             bindService(
                 Intent(this, MusicService::class.java),
                 serviceConnection,
@@ -930,22 +938,29 @@ class MainActivity : FragmentActivity() {
                     }
                 }
 
-                LaunchedEffect(activePlayerConnection) {
-                    val player = runCatching { activePlayerConnection?.player }.getOrNull()
-                    if (player?.currentMediaItem == null) {
+                // so liek right here there was some issue I saw where it only checked currentMediaItem once
+                // before the restored queue even finished loading on IO and the listener only checked PLAYLIST_CHANGED
+                // on the old exoplayer instance so after crossfade or restore the player wouldn't appear till force stop lol
+                val currentMediaMetadata by activePlayerConnection?.mediaMetadata?.collectAsStateWithLifecycle()
+                    ?: remember { mutableStateOf(null) }
+                val activeExoPlayer by activePlayerConnection?.service?.playerFlow?.collectAsStateWithLifecycle()
+                    ?: remember { mutableStateOf(null) }
+
+                LaunchedEffect(activePlayerConnection, playerBottomSheetState, currentMediaMetadata, activeExoPlayer) {
+                    val connection = activePlayerConnection ?: return@LaunchedEffect
+                    val player = activeExoPlayer ?: runCatching { connection.player }.getOrNull()
+                    val hasMedia = currentMediaMetadata != null || player?.currentMediaItem != null
+                    if (!hasMedia) {
                         if (!playerBottomSheetState.isDismissed) {
                             playerBottomSheetState.dismiss()
                         }
-                        return@LaunchedEffect
-                    }
-
-                    if (playerBottomSheetState.isDismissed) {
+                    } else if (playerBottomSheetState.isDismissed) {
                         playerBottomSheetState.collapseSoft()
                     }
                 }
 
-                DisposableEffect(activePlayerConnection, playerBottomSheetState) {
-                    val player = runCatching { activePlayerConnection?.player }.getOrNull()
+                DisposableEffect(activePlayerConnection, activeExoPlayer, playerBottomSheetState) {
+                    val player = activeExoPlayer ?: runCatching { activePlayerConnection?.player }.getOrNull()
                         ?: return@DisposableEffect onDispose { }
                     val listener =
                         object : Player.Listener {
@@ -953,15 +968,24 @@ class MainActivity : FragmentActivity() {
                                 mediaItem: MediaItem?,
                                 reason: Int,
                             ) {
-                                if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED &&
-                                    mediaItem != null &&
-                                    playerBottomSheetState.isDismissed
-                                ) {
+                                if (mediaItem != null && playerBottomSheetState.isDismissed) {
+                                    playerBottomSheetState.collapseSoft()
+                                }
+                            }
+
+                            override fun onTimelineChanged(
+                                timeline: androidx.media3.common.Timeline,
+                                reason: Int,
+                            ) {
+                                if (player.currentMediaItem != null && playerBottomSheetState.isDismissed) {
                                     playerBottomSheetState.collapseSoft()
                                 }
                             }
                         }
                     player.addListener(listener)
+                    if (player.currentMediaItem != null && playerBottomSheetState.isDismissed) {
+                        playerBottomSheetState.collapseSoft()
+                    }
                     onDispose {
                         player.removeListener(listener)
                     }

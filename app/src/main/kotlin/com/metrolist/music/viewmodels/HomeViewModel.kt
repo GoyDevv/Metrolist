@@ -25,22 +25,30 @@ import com.metrolist.innertube.pages.ExplorePage
 import com.metrolist.innertube.pages.HomePage
 import com.metrolist.innertube.utils.completed
 import com.metrolist.music.constants.AccountNameKey
+import com.metrolist.music.constants.ContentCountryKey
+import com.metrolist.music.constants.DataSyncIdKey
 import com.metrolist.music.constants.HideExplicitKey
 import com.metrolist.music.constants.HideVideoSongsKey
 import com.metrolist.music.constants.HideYoutubeShortsKey
+import com.metrolist.music.constants.InnerTubeAuthUserKey
 import com.metrolist.music.constants.InnerTubeCookieKey
 import com.metrolist.music.constants.QuickPicks
 import com.metrolist.music.constants.QuickPicksKey
+import com.metrolist.music.constants.SYSTEM_DEFAULT
 import com.metrolist.music.constants.ShowWrappedCardKey
+import com.metrolist.music.constants.UseLoginForBrowse
+import com.metrolist.music.constants.VisitorDataKey
 import com.metrolist.music.constants.WrappedSeenKey
 import com.metrolist.music.db.MusicDatabase
 import com.metrolist.music.db.entities.Album
 import com.metrolist.music.db.entities.LocalItem
+import com.metrolist.music.db.entities.RelatedSongMap
 import com.metrolist.music.db.entities.Song
 import com.metrolist.music.db.entities.SpeedDialItem
 import com.metrolist.music.extensions.filterVideoSongs
 import com.metrolist.music.extensions.toEnum
 import com.metrolist.music.models.SimilarRecommendation
+import com.metrolist.music.models.toMediaMetadata
 import com.metrolist.music.ui.screens.wrapped.WrappedAudioService
 import com.metrolist.music.ui.screens.wrapped.WrappedManager
 import com.metrolist.music.utils.NetworkConnectivityObserver
@@ -271,12 +279,49 @@ class HomeViewModel @Inject constructor(
             }
         }
     }
+
+    // so liek right here when we're logged in we wanna pull recent songs from yt music history too
+    // so suggestions actually come from what we listened to previously on yt music instead of random regional stuff
+    private suspend fun getRecentAccountHistorySongs(limit: Int = 8): List<Song> {
+        if (YouTube.cookie.isNullOrBlank()) return emptyList()
+        val historyItems =
+            YouTube.musicHistory()
+                .getOrNull()
+                ?.sections
+                ?.flatMap { it.songs }
+                ?.filter { !it.isEpisode }
+                ?.distinctBy { it.id }
+                ?.take(limit)
+                .orEmpty()
+        if (historyItems.isEmpty()) return emptyList()
+
+        database.query {
+            historyItems.forEach { item ->
+                insert(item.toMediaMetadata())
+            }
+        }
+        return historyItems.mapNotNull { item ->
+            database.song(item.id).first()
+        }
+    }
+
     private suspend fun getDailyDiscover() {
         val hideVideoSongs = context.dataStore.get(HideVideoSongsKey, false)
         val likedSongs = database.likedSongsByCreateDateAsc().first()
-        if (likedSongs.isEmpty()) return
+        val recentLocalSongs =
+            database.mostPlayedSongs(
+                fromTimeStamp = LocalDateTime.now().minusWeeks(4),
+                limit = 15,
+                offset = 0,
+                toTimeStamp = LocalDateTime.now(),
+            ).first()
+        // so liek right here there was some issue I saw where if likedSongs was empty it just gave up
+        // even when we had listening history on our logged in yt music account lol
+        val ytHistorySongs = if (likedSongs.size < 5) getRecentAccountHistorySongs(limit = 6) else emptyList()
+        val candidateSeeds = (likedSongs + recentLocalSongs + ytHistorySongs).distinctBy { it.id }
+        if (candidateSeeds.isEmpty()) return
 
-        val seeds = likedSongs.shuffled().distinctBy { it.id }.take(5)
+        val seeds = candidateSeeds.shuffled().take(5)
         
         // Use a synchronized list to collect results safely from concurrent coroutines
         val items = java.util.Collections.synchronizedList(mutableListOf<DailyDiscoverItem>())
@@ -328,14 +373,30 @@ class HomeViewModel @Inject constructor(
 
                 // Get similar songs from YouTube based on recent listening
                 val recentSong = database.latestEvent().first()?.song
+                val ytHistorySeeds = getRecentAccountHistorySongs(limit = 4)
+                val seedSongs = (listOfNotNull(recentSong) + ytHistorySeeds).distinctBy { it.id }.take(3)
                 val ytSimilarSongs = mutableListOf<Song>()
 
-                if (recentSong != null) {
-                    val endpoint = YouTube.next(WatchEndpoint(videoId = recentSong.id)).getOrNull()?.relatedEndpoint
+                for (seedSong in seedSongs) {
+                    val endpoint = YouTube.next(WatchEndpoint(videoId = seedSong.id)).getOrNull()?.relatedEndpoint
                     if (endpoint != null) {
                         YouTube.related(endpoint).onSuccess { page ->
-                            // Convert YouTube songs to local Song format if they exist in database
-                            page.songs.take(10).forEach { ytSong ->
+                            val topRelated = page.songs.take(10)
+                            // so liek right here there was some issue I saw where it checked database.song(ytSong.id)
+                            // without inserting the ytSong first so it was literally always null unless u already had it in db lol
+                            database.query {
+                                topRelated.forEach { ytSong ->
+                                    val metadata = ytSong.toMediaMetadata()
+                                    insert(metadata)
+                                    insert(
+                                        RelatedSongMap(
+                                            songId = seedSong.id,
+                                            relatedSongId = metadata.id,
+                                        ),
+                                    )
+                                }
+                            }
+                            topRelated.forEach { ytSong ->
                                 database.song(ytSong.id).first()?.let { localSong ->
                                     if (!hideVideoSongs || !localSong.song.isVideo) {
                                         ytSimilarSongs.add(localSong)
@@ -347,7 +408,7 @@ class HomeViewModel @Inject constructor(
                 }
 
                 // Combine all sources and remove duplicates
-                val combined = (relatedSongs + forgotten + ytSimilarSongs)
+                val combined = (ytSimilarSongs + ytHistorySeeds + relatedSongs + forgotten)
                     .distinctBy { it.id }
                     .shuffled()
                     .take(20)
@@ -355,9 +416,25 @@ class HomeViewModel @Inject constructor(
                 quickPicks.value = combined.ifEmpty { relatedSongs.shuffled().take(20) }
             }
             QuickPicks.LAST_LISTEN -> {
-                val song = database.latestEvent().first()?.song
-                if (song != null && database.hasRelatedSongs(song.id)) {
-                    quickPicks.value = database.getRelatedSongs(song.id).first().filterVideoSongs(hideVideoSongs).shuffled().take(20)
+                val song = database.latestEvent().first()?.song ?: getRecentAccountHistorySongs(limit = 1).firstOrNull()
+                if (song != null) {
+                    if (!database.hasRelatedSongs(song.id)) {
+                        val endpoint = YouTube.next(WatchEndpoint(videoId = song.id)).getOrNull()?.relatedEndpoint
+                        if (endpoint != null) {
+                            YouTube.related(endpoint).onSuccess { page ->
+                                database.query {
+                                    page.songs.forEach { ytSong ->
+                                        val metadata = ytSong.toMediaMetadata()
+                                        insert(metadata)
+                                        insert(RelatedSongMap(songId = song.id, relatedSongId = metadata.id))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (database.hasRelatedSongs(song.id)) {
+                        quickPicks.value = database.getRelatedSongs(song.id).first().filterVideoSongs(hideVideoSongs).shuffled().take(20)
+                    }
                 }
             }
         }
@@ -524,8 +601,13 @@ class HomeViewModel @Inject constructor(
                     )
                 }
 
-            val songRecommendations = database.mostPlayedSongs(fromTimeStamp = fromTimeStamp, limit = 15, offset = 0, toTimeStamp = LocalDateTime.now()).first()
-                .filter { it.album != null }
+            val localMostPlayedSongs =
+                database.mostPlayedSongs(fromTimeStamp = fromTimeStamp, limit = 15, offset = 0, toTimeStamp = LocalDateTime.now()).first()
+                    .filter { it.album != null }
+            // so liek right here if we're logged in also mix in our yt music history songs for similar recommendations
+            val historyFallbackSongs = if (localMostPlayedSongs.size < 3) getRecentAccountHistorySongs(limit = 5) else emptyList()
+            val songRecommendations = (localMostPlayedSongs + historyFallbackSongs)
+                .distinctBy { it.id }
                 .shuffled().take(3)
                 .mapNotNull { song ->
                     val endpoint = YouTube.next(WatchEndpoint(videoId = song.id)).getOrNull()?.relatedEndpoint
@@ -755,15 +837,23 @@ class HomeViewModel @Inject constructor(
         }
 
         // Listen for cookie changes and reload account data
+        var lastObservedCookie: String? = null
         viewModelScope.launch(Dispatchers.IO) {
             context.dataStore.data
                 .map { it[InnerTubeCookieKey] to it[AccountNameKey] }
                 .distinctUntilChanged()
                 .collect { (cookie, savedAccountName) ->
+                    val cookieChanged = lastObservedCookie != null && lastObservedCookie != cookie
+                    lastObservedCookie = cookie
                     if (!cookie.isNullOrEmpty()) {
                         YouTube.cookie = cookie
                         accountName.value = savedAccountName.orEmpty().ifBlank { "Guest" }
                         loadAccountInfo()
+                        // so liek right here if the cookie changed or just finished loading after home already loaded
+                        // we gotta reload home so it stops showing the logged out regional stuff
+                        if (cookieChanged && isHomeDataLoaded) {
+                            load()
+                        }
                     } else {
                         accountName.value = "Guest"
                         accountImageUrl.value = null
@@ -791,10 +881,23 @@ class HomeViewModel @Inject constructor(
         if (isHomeDataLoaded) return
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val cookie = context.dataStore.data
-                    .map { it[InnerTubeCookieKey] }
-                    .distinctUntilChanged()
-                    .first()
+                // so liek right here there was some issue I saw where loadHomeData only read InnerTubeCookieKey
+                // and didn't set dataSyncId or visitorData or regionOverrideActive before calling load() lol
+                val prefs = context.dataStore.data.first()
+                val cookie = prefs[InnerTubeCookieKey]
+                YouTube.useLoginForBrowse = prefs[UseLoginForBrowse] ?: true
+                YouTube.regionOverrideActive =
+                    prefs[ContentCountryKey]?.takeIf { it != SYSTEM_DEFAULT } != null
+                YouTube.authUser = prefs[InnerTubeAuthUserKey] ?: "0"
+                YouTube.dataSyncId =
+                    prefs[DataSyncIdKey]?.let {
+                        it.takeIf { !it.contains("||") }
+                            ?: it.takeIf { it.endsWith("||") }?.substringBefore("||")
+                            ?: it.substringAfter("||")
+                    }
+                prefs[VisitorDataKey]?.takeIf { it != "null" && it.isNotBlank() }?.let {
+                    YouTube.visitorData = it
+                }
 
                 if (!cookie.isNullOrEmpty()) {
                     YouTube.cookie = cookie

@@ -332,7 +332,11 @@ class MusicService :
 
     inner class MusicBinder : Binder() {
         val service: MusicService
-            get() = this@MusicService
+            get() {
+                // so liek right here if the activity accesses the binder we know the user is back so clear taskCleared
+                taskCleared = false
+                return this@MusicService
+            }
     }
 
     private lateinit var connectivityManager: ConnectivityManager
@@ -616,9 +620,9 @@ class MusicService :
         // On some OEMs (e.g. MIUI), even a DataStore read can be slow
         // enough to miss the window, so we promote before any I/O.
         ensureForegroundChannelExists()
-        if (!ensureStartedAsForegroundOrStop()) {
-            return
-        }
+        // so liek right here there was some issue I saw where if startForeground got blocked in onCreate
+        // it returned early before creating player so MusicService stayed bound as a broken zombie till force stop lol
+        tryEnsureForegroundWithLatestNotification()
 
         // Read ALL startup preferences in one shot so that subsequent code
         // never calls dataStore.get() (which does runBlocking internally).
@@ -1790,6 +1794,10 @@ class MusicService :
         playWhenReady: Boolean = true,
         restoringQueue: Boolean = false,
     ) {
+        // so liek right here if user explicitly plays a queue after clearing recents don't silently drop it lol
+        if (playWhenReady && !restoringQueue) {
+            taskCleared = false
+        }
         if (taskCleared) return
         if (!playerInitialized.value) {
             Timber.tag(TAG).w("playQueue called before player initialization, queuing request")
@@ -4326,11 +4334,11 @@ class MusicService :
         shutdownDeferred.complete(Unit)
     }
 
-    override fun onBind(intent: Intent?) =
-        super.onBind(intent) ?: binder.also {
-            // The app UI rebinding to a still-alive instance means the user is back.
-            taskCleared = false
-        }
+    override fun onBind(intent: Intent?): android.os.IBinder {
+        // so liek right here super.onBind can return non-null so the old .also block didn't even run smh
+        taskCleared = false
+        return super.onBind(intent) ?: binder
+    }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         if (dataStore.get(StopMusicOnTaskClearKey, false)) {

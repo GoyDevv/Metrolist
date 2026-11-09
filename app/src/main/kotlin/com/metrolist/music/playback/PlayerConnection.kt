@@ -12,6 +12,9 @@ import androidx.media3.common.Player
 import androidx.media3.common.Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM
 import androidx.media3.common.Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM
 import androidx.media3.common.Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM
+import androidx.media3.common.Player.EVENT_MEDIA_ITEM_TRANSITION
+import androidx.media3.common.Player.EVENT_POSITION_DISCONTINUITY
+import androidx.media3.common.Player.EVENT_TIMELINE_CHANGED
 import androidx.media3.common.Player.REPEAT_MODE_OFF
 import androidx.media3.common.Player.STATE_ENDED
 import androidx.media3.common.Timeline
@@ -139,6 +142,11 @@ class PlayerConnection(
                 isPlayerInitialized.value = ready
                 if (ready) {
                     Timber.tag(TAG).d("Service player initialization detected by PlayerConnection")
+                    // so liek right here if the player wasn't ready when we first connected we gotta attach it now
+                    val readyPlayer = getPlayerOrNull()
+                    if (readyPlayer != null && readyPlayer != attachedPlayer) {
+                        updateAttachedPlayer(readyPlayer)
+                    }
                 }
             }
         }
@@ -624,11 +632,23 @@ class PlayerConnection(
         timeline: Timeline,
         reason: Int,
     ) {
+        // so liek right here there was some issue I saw where mediaMetadata wasn't updated when timeline changed
+        // so when queue restored or items got set the miniplayer didn't know a song was loaded lol
+        mediaMetadata.value = player.currentMetadata
         queueWindows.value = player.getQueueWindows()
         queueTitle.value = service.queueTitle
         currentMediaItemIndex.value = player.currentMediaItemIndex
         currentWindowIndex.value = player.getCurrentQueueIndex()
         updateCanSkipPreviousAndNext()
+    }
+
+    override fun onEvents(
+        player: Player,
+        events: Player.Events,
+    ) {
+        if (events.containsAny(EVENT_TIMELINE_CHANGED, EVENT_POSITION_DISCONTINUITY, EVENT_MEDIA_ITEM_TRANSITION)) {
+            mediaMetadata.value = player.currentMetadata
+        }
     }
 
     override fun onShuffleModeEnabledChanged(enabled: Boolean) {

@@ -178,8 +178,10 @@ class BottomSheetState(
 
     val value by animatable.asState()
 
+    // so liek right here there was some issue I saw where isDismissed only checked value == lowerBound
+    // so if dismiss() was still animating down when the queue loaded it thought it wasn't dismissed and never popped up lol
     val isDismissed by derivedStateOf {
-        value == animatable.lowerBound!!
+        value == animatable.lowerBound!! || animatable.targetValue == animatable.lowerBound!!
     }
 
     val isCollapsed by derivedStateOf {

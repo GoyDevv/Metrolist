@@ -109,6 +109,14 @@ class InnerTube(
             innerTubeX.useLoginForBrowse = value
         }
 
+    // so liek right here there was some issue I saw where regionOverrideActive wasn't exposed at all
+    // so setting locale always forced regional stuff even when we didn't override country in settings
+    var regionOverrideActive: Boolean
+        get() = innerTubeX.regionOverrideActive
+        set(value) {
+            innerTubeX.regionOverrideActive = value
+        }
+
     @Synchronized
     private fun recreateTransport() {
         val session = innerTubeX.sessionSnapshot()
@@ -242,13 +250,15 @@ class InnerTube(
         return true
     }
 
+    // so liek right here browse had setLogin = false by default and didn't check useLoginForBrowse
+    // so when we were logged in it was still doing anonymous browse requests and giving regional stuff
     suspend fun browse(
         client: YouTubeClient,
         browseId: String? = null,
         params: String? = null,
         continuation: String? = null,
         setLogin: Boolean = false,
-    ) = innerTubeX.browse(client, browseId, params, continuation, setLogin)
+    ) = innerTubeX.browse(client, browseId, params, continuation, setLogin || useLoginForBrowse)
 
     suspend fun next(
         client: YouTubeClient,
@@ -268,7 +278,8 @@ class InnerTube(
     suspend fun getSearchSuggestions(
         client: YouTubeClient,
         input: String,
-    ) = innerTubeX.getSearchSuggestions(client, input, setLogin = false)
+        setLogin: Boolean = false,
+    ) = innerTubeX.getSearchSuggestions(client, input, setLogin = setLogin)
 
     suspend fun getQueue(
         client: YouTubeClient,

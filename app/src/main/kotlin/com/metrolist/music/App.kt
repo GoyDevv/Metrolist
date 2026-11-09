@@ -127,10 +127,11 @@ class App :
             runCatching { getString(id) }.getOrNull()
         }
 
+        val customContentCountry = settings[ContentCountryKey]?.takeIf { it != SYSTEM_DEFAULT }
         YouTube.locale =
             YouTubeLocale(
                 gl =
-                    settings[ContentCountryKey]?.takeIf { it != SYSTEM_DEFAULT }
+                    customContentCountry
                         ?: locale.country.takeIf { it in CountryCodeToName }
                         ?: "US",
                 hl =
@@ -139,6 +140,26 @@ class App :
                         ?: languageTag.takeIf { it in LanguageCodeToName }
                         ?: "en",
             )
+        // so liek right here there was some issue I saw where setting YouTube.locale turns on regionOverrideActive
+        // inside innertubex even when content country is on system default so it kept forcing regional stuff lol
+        YouTube.regionOverrideActive = customContentCountry != null
+
+        // so liek right here we also gotta set the auth stuff right away on startup before HomeViewModel
+        // fires YouTube.home() otherwise the first home request goes out without dataSyncId/cookie smh
+        YouTube.useLoginForBrowse = settings[UseLoginForBrowse] ?: true
+        YouTube.authUser = settings[InnerTubeAuthUserKey] ?: "0"
+        YouTube.dataSyncId =
+            settings[DataSyncIdKey]?.let {
+                it.takeIf { !it.contains("||") }
+                    ?: it.takeIf { it.endsWith("||") }?.substringBefore("||")
+                    ?: it.substringAfter("||")
+            }
+        settings[VisitorDataKey]?.takeIf { it != "null" && it.isNotBlank() }?.let {
+            YouTube.visitorData = it
+        }
+        settings[InnerTubeCookieKey]?.takeIf { it.isNotBlank() }?.let { cookie ->
+            runCatching { YouTube.cookie = cookie }
+        }
 
         if (languageTag == "zh-TW") {
             KuGou.useTraditionalChinese = true
@@ -178,8 +199,6 @@ class App :
                 reportException(e)
             }
         }
-
-        YouTube.useLoginForBrowse = settings[UseLoginForBrowse] ?: true
 
         val channel =
             NotificationChannel(
@@ -275,10 +294,11 @@ class App :
                             ?.let { Locale.forLanguageTag(it) }
                             ?: systemLocale
 
+                    val customCountry = contentCountry?.takeIf { it != SYSTEM_DEFAULT }
                     YouTube.locale =
                         YouTubeLocale(
                             gl =
-                                contentCountry?.takeIf { it != SYSTEM_DEFAULT }
+                                customCountry
                                     ?: effectiveAppLocale.country.takeIf { it in CountryCodeToName }
                                     ?: systemLocale.country.takeIf { it in CountryCodeToName }
                                     ?: "US",
@@ -288,6 +308,8 @@ class App :
                                     ?: effectiveAppLocale.language.takeIf { it in LanguageCodeToName }
                                     ?: "en",
                         )
+                    // so liek right here make sure regionOverrideActive is only true if user actually picked a country
+                    YouTube.regionOverrideActive = customCountry != null
                 }
         }
     }
